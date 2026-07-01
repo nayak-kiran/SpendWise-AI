@@ -5,6 +5,9 @@ from app import models, schemas
 from app.routes.expenses import get_current_user
 from sqlalchemy import func as sql_func
 from datetime import date
+import asyncio
+from app.email_service import send_budget_alert
+
 
 router = APIRouter()
 
@@ -62,6 +65,26 @@ def get_budget_status(
 
     remaining = budget.amount - total_spent
     percent_used = (total_spent / budget.amount * 100) if budget.amount > 0 else 0
+
+    for threshold in [100, 80,50]:
+        if percent_used >= threshold:
+            already_sent = (
+                db.query(models.AlertSent)
+                .filter(
+                    models.AlertSent.user_id == current_user.id,
+                    models.AlertSent.month == month,
+                    models.AlertSent.threshold == threshold,
+                )
+                .first()
+            )
+            if not already_sent:
+                asyncio.run(
+                    send_budget_alert(current_user.email, current_user.username, month, percent_used, threshold)
+                )
+                new_alert = models.AlertSent(user_id=current_user.id, month=month, threshold=threshold)
+                db.add(new_alert)
+                db.commit()
+            break
 
     return {
         "month": month,
