@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func as sql_func
+from pydantic import BaseModel
+import asyncio
 from app.database import get_db
 from app import models, schemas
 from app.routes.expenses import get_current_user
-from sqlalchemy import func as sql_func
-from datetime import date
-import asyncio
 from app.email_service import send_budget_alert
-
 
 router = APIRouter()
 
@@ -23,7 +22,6 @@ def set_budget(
         .filter(models.Budget.user_id == current_user.id, models.Budget.month == budget.month)
         .first()
     )
-
     if existing_budget:
         existing_budget.amount = budget.amount
         db.commit()
@@ -38,7 +36,40 @@ def set_budget(
     db.add(new_budget)
     db.commit()
     db.refresh(new_budget)
-    return new_budget 
+    return new_budget
+
+
+class BudgetAdjust(BaseModel):
+    month: str
+    amount: float
+    action: str
+
+
+@router.post("/adjust")
+def adjust_budget(
+    adjustment: BudgetAdjust,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    budget = (
+        db.query(models.Budget)
+        .filter(models.Budget.user_id == current_user.id, models.Budget.month == adjustment.month)
+        .first()
+    )
+    if not budget:
+        raise HTTPException(status_code=404, detail="No budget set for this month")
+
+    if adjustment.action == "add":
+        budget.amount += adjustment.amount
+    elif adjustment.action == "withdraw":
+        budget.amount = max(0, budget.amount - adjustment.amount)
+    else:
+        raise HTTPException(status_code=400, detail="Action must be 'add' or 'withdraw'")
+
+    db.commit()
+    db.refresh(budget)
+    return {"message": "Budget updated successfully", "new_amount": budget.amount}
+
 
 @router.get("/status/{month}")
 def get_budget_status(
@@ -66,7 +97,7 @@ def get_budget_status(
     remaining = budget.amount - total_spent
     percent_used = (total_spent / budget.amount * 100) if budget.amount > 0 else 0
 
-    for threshold in [100, 80,50]:
+    for threshold in [100, 80]:
         if percent_used >= threshold:
             already_sent = (
                 db.query(models.AlertSent)
